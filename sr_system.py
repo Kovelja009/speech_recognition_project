@@ -3,10 +3,12 @@ import json
 import os
 import numpy as np
 import librosa
+from scipy.spatial.distance import cosine
 from model import SoundModel
+from dtw_utils import dtw
 
 class SR_System():
-    def __init__(self, model_path='models/best.pth', ref_path='./data', commands_path='commands.json', use_normalization=False, ref_student='42-20', ref_iter='1', n_mfcc=24, sr=22050, hop_length=512, sound_duration=3.1):
+    def __init__(self, model_path='models/best.pth', ref_path='./data', commands_path='commands.json', use_normalization=False, ref_student='42-20', ref_iter='1', n_mfcc=24, sr=22050, hop_length=512, sound_duration=3.1, threshold=0.5):
         self.use_normalization = use_normalization
         self.ref_student = ref_student
         self.ref_iter = ref_iter
@@ -15,6 +17,7 @@ class SR_System():
         self.hop_length = hop_length
         self.sound_duration = sound_duration
         self.num_frames = int(np.ceil(self.sound_duration * self.sr / self.hop_length))
+        self.threshold = threshold
         self.ref_sound_dict = {}
         self._load_commands(commands_path)
         self._load_model(model_path)
@@ -52,7 +55,7 @@ class SR_System():
                     file_path = os.path.join(ref_path, filename)
                     audio_data, _ = librosa.load(file_path)
 
-                    preprocessed_sound = self.preprocess(audio_data)
+                    preprocessed_sound = self.preprocess(audio_data, loading_first_time=True)
 
                     self.ref_sound_dict[command] = preprocessed_sound
 
@@ -68,7 +71,7 @@ class SR_System():
         command = None
 
         if self.is_new_sound: # using dtw because our model is not trained on new sound
-            print('New sound detected')
+            command = self.dtw_predict(preprocessed_sound)
         else: # using model
             prediction = self.model(preprocessed_sound)
             command = self._idx_to_cmd(torch.argmax(prediction, dim=1))
@@ -80,8 +83,25 @@ class SR_System():
         self.commands_dict[label] = len(self.commands_dict)
         self.ref_sound_dict[label] = self.preprocess(audio_data)
 
+    def dtw_predict(self, processed_sound):
+        min_cost = 100000
+        min_command = None
 
-    def preprocess(self, audio_data):
+        for command, ref_sound in self.ref_sound_dict.items():
+            cost, _ = dtw(processed_sound, ref_sound, lambda x, y: cosine(x, y))
+            if cost < min_cost:
+                min_cost = cost
+                min_command = command
+
+        print(f'Cost: {min_cost} for command: {min_command}')
+
+        if min_cost > self.threshold:
+            return 'Unknown sound'
+        else:
+            return min_command
+
+
+    def preprocess(self, audio_data, loading_first_time=False):
         # preprocessing
         mfccs = librosa.feature.mfcc(y=audio_data, n_fft=2048, hop_length=self.hop_length, n_mfcc=self.n_mfcc)
         
@@ -106,7 +126,7 @@ class SR_System():
             mfccs = (mfccs - mean) / std_safe
 
         # means we are running model inference
-        if self.is_new_sound == False:
+        if self.is_new_sound == False and not loading_first_time == True:
             mfccs = torch.tensor(mfccs, dtype=torch.float32)
             # add batch dimension
             mfccs = mfccs.unsqueeze(0)
@@ -119,20 +139,36 @@ if __name__ == '__main__':
     sr_system = SR_System()
 
     # using data for labels that model was trained on
-    audio_data, _ = librosa.load('./test_data/krug-42-20-2.wav')
+    gt = 'krug'
+    audio_data, _ = librosa.load(f'./test_data/{gt}-42-20-3.wav')
     command = sr_system.predict(audio_data)
-    print(command)
-    audio_data, _ = librosa.load('./test_data/kvadrat-42-20-1.wav')
-    command = sr_system.predict(audio_data)
-    print(command)
+    print(f'Predicted: {command}, True: {gt}')
 
+    gt = 'kvadrat'
+    audio_data, _ = librosa.load(f'./test_data/{gt}-42-20-1.wav')
+    command = sr_system.predict(audio_data)
+    print(f'Predicted: {command}, True: {gt}')
+
+
+
+####### now we are in dtw mode because we added new sound #######
     # adding new sound
-    audio_data, _ = librosa.load('./additional_command/povecaj-42-20-1.wav')
+    gt = 'povecaj'
+    audio_data, _ = librosa.load(f'./additional_command/{gt}-42-20-1.wav')
     sr_system.add_new_sound(audio_data, 'povecaj')
-    print(f'All commands: {sr_system.commands_dict}')
 
+    print(f'All commands: {sr_system.commands_dict}')
+    print('-----------Now we are in dtw mode-----------')
+    
+    # testing new sound
     command = sr_system.predict(audio_data)
-    print(command)
+    print(f'Predicted: {command}, True: {gt}')
+
+    #testing old sounds
+    gt = 'krug'
+    audio_data, _ = librosa.load(f'./test_data/{gt}-42-20-1.wav')
+    command = sr_system.predict(audio_data)
+    print(f'Predicted: {command}, True: {gt}')
 
 
     
